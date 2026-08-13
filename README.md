@@ -1,1 +1,1 @@
-## 传输openalex数据到mysql数据库
+项目是ELT管道的EL部分，通过拆分架构为 plan worker reconcile三个阶段实现原始数据的数据库导入
