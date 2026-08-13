@@ -23,8 +23,6 @@ public class EntityConfig {
     public String table;                       // 形如 openalex.sources
     public String idPrefix;                    // S / W / A ...
     public String versionField;                // updated_date
-    public String predicate;                   // sources 为 null
-    public String filterVersion;               // none.v1
 
     public Map<String, String> consumedFields = new LinkedHashMap<>();
     public LinkedHashMap<String, TypedColumn> typedColumns = new LinkedHashMap<>();

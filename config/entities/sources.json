@@ -3,8 +3,6 @@
   "table": "openalex.sources",
   "id_prefix": "S",
   "version_field": "updated_date",
-  "predicate": null,
-  "filter_version": "none.v1",
 
   "consumed_fields": {
     "id": "去前缀取数字部分 → 主键 id",

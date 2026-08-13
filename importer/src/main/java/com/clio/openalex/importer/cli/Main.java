@@ -14,7 +14,7 @@ public final class Main {
 
     private static final String USAGE = """
             用法: java -jar importer.jar <子命令> [选项]
-              plan      --entity sources [--incremental]   读 manifest, 建 sync_job + file_task (契约 C6)
+              plan      --entity sources                  读 manifest, 建 sync_job + file_task (契约 C6)
               work      --job <id> [--workers 4]           领任务→流式导入→计数 (契约 C3/C6)
               reconcile --job <id>                         三层对账→推水位 (契约 C7)
               status    --job <id>                         进度一览 (验收 A6)
