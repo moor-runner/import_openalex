@@ -4,7 +4,6 @@ import com.clio.openalex.importer.plan.FileTask;
 import org.junit.jupiter.api.Test;
 
 import javax.sql.DataSource;
-import java.lang.reflect.Field;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
@@ -71,22 +70,12 @@ class FileTaskDAOTest {
         assertFalse(sql.contains("status"), "水位查询不能按status过滤");
         assertTrue(sql.contains("where entity = ?"));
         assertTrue(sql.contains("order by date desc, part desc"));
-        assertEquals(LocalDate.of(2026, 8, 12), field(result.orElseThrow(), "date"));
-        assertEquals(37, field(result.orElseThrow(), "part"));
+        assertEquals(LocalDate.of(2026, 8, 12), result.orElseThrow().getDate());
+        assertEquals(37, result.orElseThrow().getPart());
     }
 
     private static String normalize(String sql) {
         return sql.replaceAll("\\s+", " ").trim().toLowerCase(Locale.ROOT);
-    }
-
-    private static Object field(FileTask task, String name) {
-        try {
-            Field field = FileTask.class.getDeclaredField(name);
-            field.setAccessible(true);
-            return field.get(task);
-        } catch (ReflectiveOperationException e) {
-            throw new AssertionError(e);
-        }
     }
 
     @SuppressWarnings("unchecked")

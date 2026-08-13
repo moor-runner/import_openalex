@@ -3,7 +3,6 @@ package com.clio.openalex.importer.dao;
 import com.clio.openalex.importer.plan.FileTask;
 
 import javax.sql.DataSource;
-import java.lang.reflect.Field;
 import java.sql.Connection;
 import java.sql.Date;
 import java.sql.PreparedStatement;
@@ -55,23 +54,6 @@ public class FileTaskDAO {
                 if (!resultSet.next()) {
                     return Optional.empty();
                 }
-                return Optional.of(FileTaskMapper.map(resultSet));
-            }
-        } catch (SQLException e) {
-            throw new DataAccessException("查询file task水位失败: entity=" + entity, e);
-        }
-    }
-
-    /**
-     * FileTask字段属于plan包契约；DAO集中完成映射，不给模型追加持久化专用API。
-     */
-    private static final class FileTaskMapper {
-        private static final Field DATE = field("date");
-        private static final Field PART = field("part");
-
-        private static FileTask map(ResultSet resultSet) throws SQLException {
-            FileTask task = new FileTask();
-            try {
                 Date date = resultSet.getDate("date");
                 if (date == null) {
                     throw new SQLException("file task水位date为NULL");
@@ -80,22 +62,14 @@ public class FileTaskDAO {
                 if (resultSet.wasNull() || part < 0) {
                     throw new SQLException("file task水位part为空或为负数");
                 }
-                DATE.set(task, date.toLocalDate());
-                PART.setInt(task, part);
-                return task;
-            } catch (IllegalAccessException e) {
-                throw new IllegalStateException("无法映射FileTask契约", e);
+                FileTask task = new FileTask();
+                task.setDate(date.toLocalDate());
+                task.setPart(part);
+                return Optional.of(task);
             }
-        }
-
-        private static Field field(String name) {
-            try {
-                Field field = FileTask.class.getDeclaredField(name);
-                field.setAccessible(true);
-                return field;
-            } catch (NoSuchFieldException e) {
-                throw new ExceptionInInitializerError(e);
-            }
+        } catch (SQLException e) {
+            throw new DataAccessException("查询file task水位失败: entity=" + entity, e);
         }
     }
+
 }

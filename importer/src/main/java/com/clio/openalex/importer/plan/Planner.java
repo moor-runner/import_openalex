@@ -156,8 +156,9 @@ public final class Planner {
         FileTask watermark = fileTask.orElseThrow();
         List<FileEntry> result = new ArrayList<>();
         for (FileEntry entry : manifest.fileEntries) {
-            if (entry.date.isAfter(watermark.date)
-                    || (entry.date.isEqual(watermark.date) && entry.part > watermark.part)) {
+            if (entry.date.isAfter(watermark.getDate())
+                    || (entry.date.isEqual(watermark.getDate())
+                    && entry.part > watermark.getPart())) {
                 result.add(entry);
             }
         }
@@ -177,13 +178,23 @@ public final class Planner {
             System.out.println("没有需要同步的新文件");
             return;
         }
-        List<SyncJobDAO.PendingFileTask> tasks = new ArrayList<>(fileEntries.size());
+        SyncJob syncJob = new SyncJob();
+        syncJob.setEntity(manifest.entity);
+        syncJob.setSnapshot(LocalDate.parse(manifest.date));
+
+        List<FileTask> tasks = new ArrayList<>(fileEntries.size());
         for (FileEntry entry : fileEntries) {
-            tasks.add(new SyncJobDAO.PendingFileTask(
-                    entry.url,entry.date,entry.part,entry.count));
+            FileTask task = new FileTask();
+            task.setStatus("PENDING");
+            task.setUrl(entry.url);
+            task.setEntity(manifest.entity);
+            task.setDate(entry.date);
+            task.setPart(entry.part);
+            task.setRecordCount(entry.count);
+            task.setReadCount(0L);
+            tasks.add(task);
         }
-        long jobId = new SyncJobDAO().insertJobAndTasks(
-                manifest.entity.name(),LocalDate.parse(manifest.date),List.copyOf(tasks));
+        long jobId = new SyncJobDAO().insertJobAndTasks(syncJob,List.copyOf(tasks));
         System.out.println("创建同步计划成功: job_id=" + jobId + ", files=" + tasks.size());
     }
     private Planner() {}

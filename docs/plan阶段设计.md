@@ -6,7 +6,7 @@
 
 设计，契约，不变量：
 
-通过远端的manifest文件和本地水位(date,part)获取需要同步的文件列表，插入数据库
+通过远端的manifest文件和本地水位也就是当前entity的最新file(date,part)获取需要同步的文件列表，插入数据库
 
 获取manifest文件时需要进行文件的错误处理，文件的count自洽url完整校验
 

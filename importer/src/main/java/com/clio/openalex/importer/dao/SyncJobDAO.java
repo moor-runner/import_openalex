@@ -1,5 +1,8 @@
 package com.clio.openalex.importer.dao;
 
+import com.clio.openalex.importer.plan.FileTask;
+import com.clio.openalex.importer.plan.SyncJob;
+
 import javax.sql.DataSource;
 import java.sql.Connection;
 import java.sql.Date;
@@ -21,8 +24,6 @@ public class SyncJobDAO {
                 (job_id, status, url, entity, date, part, record_count, read_count)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """;
-    private static final String PENDING = "PENDING";
-
     private final JdbcConnections.ConnectionProvider connectionProvider;
 
     public SyncJobDAO() {
@@ -44,9 +45,11 @@ public class SyncJobDAO {
      *
      * @return 新建sync job的generated job_id
      */
-    public long insertJobAndTasks(
-            String entity, LocalDate snapshot, List<PendingFileTask> tasks) {
-        validate(entity, snapshot, tasks);
+    public long insertJobAndTasks(SyncJob syncJob, List<FileTask> tasks) {
+        Objects.requireNonNull(syncJob, "syncJob");
+        Objects.requireNonNull(tasks, "tasks");
+        String entity = syncJob.getEntity().name();
+        LocalDate snapshot = syncJob.getSnapshot();
 
         try (Connection connection = connectionProvider.open()) {
             boolean originalAutoCommit = connection.getAutoCommit();
@@ -55,7 +58,7 @@ public class SyncJobDAO {
             Throwable operationFailure = null;
             try {
                 long jobId = insertJob(connection, entity, snapshot);
-                insertTasks(connection, jobId, entity, tasks);
+                insertTasks(connection, jobId, tasks);
                 connection.commit();
                 transactionEnded = true;
                 return jobId;
@@ -101,38 +104,23 @@ public class SyncJobDAO {
     private static void insertTasks(
             Connection connection,
             long jobId,
-            String entity,
-            List<PendingFileTask> tasks) throws SQLException {
+            List<FileTask> tasks) throws SQLException {
         if (tasks.isEmpty()) {
             return;
         }
         try (PreparedStatement statement = connection.prepareStatement(INSERT_FILE_TASK)) {
-            for (PendingFileTask task : tasks) {
+            for (FileTask task : tasks) {
                 statement.setLong(1, jobId);
-                statement.setString(2, PENDING);
-                statement.setString(3, task.url());
-                statement.setString(4, entity);
-                statement.setDate(5, Date.valueOf(task.date()));
-                statement.setInt(6, task.part());
-                statement.setLong(7, task.recordCount());
-                statement.setLong(8, 0L);
+                statement.setString(2, task.getStatus());
+                statement.setString(3, task.getUrl());
+                statement.setString(4, task.getEntity().name());
+                statement.setDate(5, Date.valueOf(task.getDate()));
+                statement.setInt(6, task.getPart());
+                statement.setLong(7, task.getRecordCount());
+                statement.setLong(8, task.getReadCount());
                 statement.addBatch();
             }
             statement.executeBatch();
-        }
-    }
-
-    private static void validate(
-            String entity, LocalDate snapshot, List<PendingFileTask> tasks) {
-        if (entity == null || entity.isBlank()) {
-            throw new IllegalArgumentException("entity不能为空");
-        }
-        Objects.requireNonNull(snapshot, "snapshot");
-        Objects.requireNonNull(tasks, "tasks");
-        for (int i = 0; i < tasks.size(); i++) {
-            if (tasks.get(i) == null) {
-                throw new IllegalArgumentException("tasks[" + i + "]不能为空");
-            }
         }
     }
 
@@ -159,21 +147,4 @@ public class SyncJobDAO {
         }
     }
 
-    /** DAO层写入契约；状态、entity、jobId和readCount由DAO统一生成。 */
-    public record PendingFileTask(
-            String url, LocalDate date, int part, long recordCount) {
-        public PendingFileTask {
-            if (url == null || url.isBlank()) {
-                throw new IllegalArgumentException("url不能为空");
-            }
-            Objects.requireNonNull(date, "date");
-            if (part < 0) {
-                throw new IllegalArgumentException("part不能为负数: " + part);
-            }
-            if (recordCount < 0) {
-                throw new IllegalArgumentException(
-                        "recordCount不能为负数: " + recordCount);
-            }
-        }
-    }
 }

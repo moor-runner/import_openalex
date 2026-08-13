@@ -1,5 +1,8 @@
 package com.clio.openalex.importer.dao;
 
+import com.clio.openalex.importer.plan.Entity;
+import com.clio.openalex.importer.plan.FileTask;
+import com.clio.openalex.importer.plan.SyncJob;
 import org.junit.jupiter.api.Test;
 
 import javax.sql.DataSource;
@@ -27,21 +30,21 @@ class SyncJobDAOTest {
     void successfulWriteUsesOneTransactionAndBindsGeneratedJobIdAndTaskDefaults() {
         FakeJdbc jdbc = new FakeJdbc(false, 8123L);
         LocalDate snapshot = LocalDate.of(2026, 8, 13);
-        List<SyncJobDAO.PendingFileTask> tasks = List.of(
-                new SyncJobDAO.PendingFileTask("s3://bucket/part_0000.gz",
+        List<FileTask> tasks = List.of(
+                fileTask("s3://bucket/part_0000.gz",
                         LocalDate.of(2026, 8, 11), 0, 21),
-                new SyncJobDAO.PendingFileTask("s3://bucket/part_0001.gz",
+                fileTask("s3://bucket/part_0001.gz",
                         LocalDate.of(2026, 8, 11), 1, 34));
 
         long jobId = new SyncJobDAO(jdbc.dataSource)
-                .insertJobAndTasks("sources", snapshot, tasks);
+                .insertJobAndTasks(syncJob(snapshot), tasks);
 
         assertEquals(8123L, jobId);
         assertEquals(1, jdbc.connectionRequests, "整个事务只能获取一个Connection");
         assertEquals(List.of(false, true), jdbc.autoCommitChanges);
         assertEquals(1, jdbc.commits);
         assertEquals(0, jdbc.rollbacks);
-        assertEquals("sources", jdbc.jobParameters.get(1));
+        assertEquals("SOURCES", jdbc.jobParameters.get(1));
         assertEquals(Date.valueOf(snapshot), jdbc.jobParameters.get(2));
         assertTrue(normalize(jdbc.jobSql).contains(
                 "insert into sync_job (entity, snapshot, created_at)"));
@@ -49,10 +52,10 @@ class SyncJobDAOTest {
         assertEquals(2, jdbc.taskBatches.size());
 
         assertTask(jdbc.taskBatches.get(0), 8123L, "PENDING",
-                "s3://bucket/part_0000.gz", "sources",
+                "s3://bucket/part_0000.gz", "SOURCES",
                 LocalDate.of(2026, 8, 11), 0, 21L, 0L);
         assertTask(jdbc.taskBatches.get(1), 8123L, "PENDING",
-                "s3://bucket/part_0001.gz", "sources",
+                "s3://bucket/part_0001.gz", "SOURCES",
                 LocalDate.of(2026, 8, 11), 1, 34L, 0L);
     }
 
@@ -60,14 +63,13 @@ class SyncJobDAOTest {
     void batchFailureRollsBackAndNeverCommits() {
         FakeJdbc jdbc = new FakeJdbc(true, 99L);
         SyncJobDAO dao = new SyncJobDAO(jdbc.dataSource);
-        List<SyncJobDAO.PendingFileTask> tasks = List.of(
-                new SyncJobDAO.PendingFileTask("s3://bucket/part_0000.gz",
-                        LocalDate.of(2026, 8, 12), 0, 1));
+        List<FileTask> tasks = List.of(fileTask("s3://bucket/part_0000.gz",
+                LocalDate.of(2026, 8, 12), 0, 1));
 
         DataAccessException failure = assertThrows(
                 DataAccessException.class,
                 () -> dao.insertJobAndTasks(
-                        "sources", LocalDate.of(2026, 8, 13), tasks));
+                        syncJob(LocalDate.of(2026, 8, 13)), tasks));
 
         assertTrue(failure.getCause() instanceof SQLException);
         assertEquals(1, jdbc.connectionRequests);
@@ -80,14 +82,13 @@ class SyncJobDAOTest {
     void rollbackFailureIsSuppressedAndDoesNotRestoreAutoCommit() {
         FakeJdbc jdbc = new FakeJdbc(true, true, 100L);
         SyncJobDAO dao = new SyncJobDAO(jdbc.dataSource);
-        List<SyncJobDAO.PendingFileTask> tasks = List.of(
-                new SyncJobDAO.PendingFileTask("s3://bucket/part_0000.gz",
-                        LocalDate.of(2026, 8, 12), 0, 1));
+        List<FileTask> tasks = List.of(fileTask("s3://bucket/part_0000.gz",
+                LocalDate.of(2026, 8, 12), 0, 1));
 
         DataAccessException failure = assertThrows(
                 DataAccessException.class,
                 () -> dao.insertJobAndTasks(
-                        "sources", LocalDate.of(2026, 8, 13), tasks));
+                        syncJob(LocalDate.of(2026, 8, 13)), tasks));
 
         Throwable operationFailure = failure.getCause();
         assertTrue(operationFailure instanceof SQLException);
@@ -119,6 +120,26 @@ class SyncJobDAOTest {
         assertEquals(part, parameters.get(6));
         assertEquals(recordCount, parameters.get(7));
         assertEquals(readCount, parameters.get(8));
+    }
+
+    private static SyncJob syncJob(LocalDate snapshot) {
+        SyncJob syncJob = new SyncJob();
+        syncJob.setEntity(Entity.SOURCES);
+        syncJob.setSnapshot(snapshot);
+        return syncJob;
+    }
+
+    private static FileTask fileTask(
+            String url, LocalDate date, int part, long recordCount) {
+        FileTask task = new FileTask();
+        task.setStatus("PENDING");
+        task.setUrl(url);
+        task.setEntity(Entity.SOURCES);
+        task.setDate(date);
+        task.setPart(part);
+        task.setRecordCount(recordCount);
+        task.setReadCount(0L);
+        return task;
     }
 
     private static String normalize(String sql) {
