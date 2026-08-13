@@ -1,6 +1,7 @@
 package com.clio.openalex.importer.plan;
 
 import com.clio.openalex.importer.dao.FileTaskDAO;
+import com.clio.openalex.importer.dao.SyncJobDAO;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -10,21 +11,20 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
-import java.sql.*;
 import java.time.Duration;
+import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Set;
 import java.util.Optional;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
 public final class Planner {
 
-    /**
-     * @param args
-     * @return
-     */
-    private static final String URL="jdbc:mysql://localhost:3306/openalex";
-    private static final String USERS="root";
-    private static final String PASSWORD="1234";
+    private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(30);
+    private static final Pattern FILE_URL = Pattern.compile(
+            "^s3://openalex/data/jsonl/([a-z0-9-]+)/updated_date="
+                    + "(\\d{4}-\\d{2}-\\d{2})/part_(\\d+)\\.gz$");
 
     /**
      * 通过远端的Manifest文件和本地的file task水位线判断是否需要创建新任务，如果需要，创建新任务
@@ -37,8 +37,6 @@ public final class Planner {
         FileTaskDAO fileTaskDAO = new FileTaskDAO();
         Optional<FileTask> fileTask = fileTaskDAO.selectLatestFileTask(entity.name());
         List<FileEntry> newFilesSince=newFilesSince(manifest,fileTask);
-        //创建sync job和file task
-        //插入数据库
         insertJobAndTask(manifest,newFilesSince);
         return 0;
     }
@@ -54,17 +52,32 @@ public final class Planner {
                 .connectTimeout(Duration.ofSeconds(10))
                 .followRedirects(HttpClient.Redirect.NORMAL)
                 .build();
-        HttpRequest request = HttpRequest.newBuilder(URI.create(entity.getLocation())).header("Accept","application/json").build();
+        URI uri = URI.create(entity.getLocation());
+        HttpRequest request = HttpRequest.newBuilder(uri)
+                .timeout(REQUEST_TIMEOUT)
+                .header("Accept","application/json")
+                .GET()
+                .build();
         HttpResponse<String> response;
         try {
             response = client.send(request,  HttpResponse.BodyHandlers.ofString());
         } catch (IOException e) {
-            throw new RuntimeException("HttpClient发送IO异常",e);
+            throw new IllegalStateException("下载manifest失败: " + uri,e);
         } catch (InterruptedException e) {
-            throw new RuntimeException("HttpClient被打断异常",e);
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("下载manifest时线程被中断: " + uri,e);
         }
-        String body = response.body();
-        return parse(body);
+        if (response.statusCode() < 200 || response.statusCode() >= 300) {
+            throw new IllegalStateException(
+                    "下载manifest失败: HTTP " + response.statusCode() + ", uri=" + uri);
+        }
+        Manifest manifest = parse(response.body());
+        if (manifest.entity != entity) {
+            throw new IllegalArgumentException(
+                    "manifest entity与请求不一致: expected=" + entity.name()
+                            + ", actual=" + manifest.entity.name());
+        }
+        return manifest;
     }
 
     /**
@@ -74,29 +87,57 @@ public final class Planner {
      * @return
      */
     private static Manifest parse(String body){
-        //TODO 增加合理性校验和空校验
         ObjectMapper objectMapper = new ObjectMapper();
         JsonNode jsonNode;
         try {
             jsonNode = objectMapper.readTree(body);
         } catch (JsonProcessingException e) {
-            throw new RuntimeException("manifest JSON 语法解析失败(文件损坏或拿到的不是 JSON)",e);
+            throw new IllegalArgumentException(
+                    "manifest JSON语法解析失败(文件损坏或拿到的不是JSON)",e);
+        }
+        if (jsonNode == null || !jsonNode.isObject()) {
+            throw new IllegalArgumentException("manifest顶层必须是JSON对象");
         }
         String date = jsonNode.required("date").asText();
+        LocalDate.parse(date);
         Entity entity = Entity.parse(jsonNode.required("entity").asText());
-        Long manifest_count=jsonNode.required("record_count").asLong();
-        Long manifest_length=jsonNode.required("content_length").asLong();
+        long manifestCount=jsonNode.required("record_count").asLong();
+        long manifestLength=jsonNode.required("content_length").asLong();
         JsonNode files = jsonNode.required("files");
+        if (!files.isArray()) {
+            throw new IllegalArgumentException("manifest.files必须是数组");
+        }
+
         List<FileEntry> fileEntries = new ArrayList<>();
+        long fileCountSum = 0;
 
         for (JsonNode fileNode : files) {
             String url = fileNode.required("url").asText();
-            Long file_count=fileNode.required("record_count").asLong();
-            Long file_length=fileNode.required("content_length").asLong();
-            fileEntries.add(new FileEntry(url,file_count,file_length));
+            JsonNode meta = fileNode.required("meta");
+            long fileCount=meta.required("record_count").asLong();
+            long fileLength=meta.required("content_length").asLong();
+
+            Matcher matcher = FILE_URL.matcher(url);
+            if (!matcher.matches()) {
+                throw new IllegalArgumentException("文件url格式不完整: " + url);
+            }
+            if (Entity.parse(matcher.group(1)) != entity) {
+                throw new IllegalArgumentException(
+                        "文件url中的entity与manifest不一致: " + url);
+            }
+            LocalDate partitionDate = LocalDate.parse(matcher.group(2));
+            int part = Integer.parseInt(matcher.group(3));
+
+            fileCountSum += fileCount;
+            fileEntries.add(new FileEntry(url,fileCount,fileLength,part,partitionDate));
         }
 
-        return new Manifest(entity, date, manifest_count,manifest_length,List.copyOf(fileEntries));
+        if (fileCountSum != manifestCount) {
+            throw new IllegalArgumentException(
+                    "manifest record_count不自洽: manifest=" + manifestCount
+                            + ", files=" + fileCountSum);
+        }
+        return new Manifest(entity,date,manifestCount,manifestLength,List.copyOf(fileEntries));
     }
 
     /**
@@ -109,7 +150,18 @@ public final class Planner {
      * @return
      */
     private static List<FileEntry> newFilesSince(Manifest manifest,Optional<FileTask> fileTask){
-        
+        if (fileTask.isEmpty()) {
+            return List.copyOf(manifest.fileEntries);
+        }
+        FileTask watermark = fileTask.orElseThrow();
+        List<FileEntry> result = new ArrayList<>();
+        for (FileEntry entry : manifest.fileEntries) {
+            if (entry.date.isAfter(watermark.date)
+                    || (entry.date.isEqual(watermark.date) && entry.part > watermark.part)) {
+                result.add(entry);
+            }
+        }
+        return List.copyOf(result);
     }
 
     /**
@@ -121,7 +173,18 @@ public final class Planner {
      * @param fileEntries
      */
     private static void insertJobAndTask(Manifest manifest,List<FileEntry> fileEntries){
-
+        if (fileEntries == null || fileEntries.isEmpty()) {
+            System.out.println("没有需要同步的新文件");
+            return;
+        }
+        List<SyncJobDAO.PendingFileTask> tasks = new ArrayList<>(fileEntries.size());
+        for (FileEntry entry : fileEntries) {
+            tasks.add(new SyncJobDAO.PendingFileTask(
+                    entry.url,entry.date,entry.part,entry.count));
+        }
+        long jobId = new SyncJobDAO().insertJobAndTasks(
+                manifest.entity.name(),LocalDate.parse(manifest.date),List.copyOf(tasks));
+        System.out.println("创建同步计划成功: job_id=" + jobId + ", files=" + tasks.size());
     }
     private Planner() {}
 }
