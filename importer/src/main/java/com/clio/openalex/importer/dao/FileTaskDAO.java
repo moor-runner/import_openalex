@@ -1,6 +1,9 @@
 package com.clio.openalex.importer.dao;
 
 import com.clio.openalex.importer.plan.FileTask;
+import com.clio.openalex.importer.plan.Planner;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import javax.sql.DataSource;
 import java.sql.Connection;
@@ -21,12 +24,15 @@ public class FileTaskDAO {
             """;
 
     private final JdbcConnections.ConnectionProvider connectionProvider;
+    private static final Logger log = LoggerFactory.getLogger(Planner.class);
 
     public FileTaskDAO() {
         this(JdbcConnections::open);
     }
 
-    /** 允许测试或嵌入式调用方提供连接池。 */
+    /**
+     * 允许测试或嵌入式调用方提供连接池。
+     */
     public FileTaskDAO(DataSource dataSource) {
         this(Objects.requireNonNull(dataSource, "dataSource")::getConnection);
     }
@@ -43,6 +49,7 @@ public class FileTaskDAO {
      * @return 最新任务；当前entity还没有任务时为空
      */
     public Optional<FileTask> selectLatestFileTask(String entity) {
+        log.info("开始水位查询");
         if (entity == null || entity.isBlank()) {
             throw new IllegalArgumentException("entity不能为空");
         }
@@ -52,6 +59,7 @@ public class FileTaskDAO {
             statement.setString(1, entity);
             try (ResultSet resultSet = statement.executeQuery()) {
                 if (!resultSet.next()) {
+                    log.info("水位为空");
                     return Optional.empty();
                 }
                 Date date = resultSet.getDate("date");
@@ -65,6 +73,7 @@ public class FileTaskDAO {
                 FileTask task = new FileTask();
                 task.setDate(date.toLocalDate());
                 task.setPart(part);
+                log.info("返回水位");
                 return Optional.of(task);
             }
         } catch (SQLException e) {

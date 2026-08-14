@@ -27,6 +27,7 @@ public final class Planner {
     private static final Pattern FILE_URL = Pattern.compile(
             "^s3://openalex/data/jsonl/([a-z0-9-]+)/updated_date="
                     + "(\\d{4}-\\d{2}-\\d{2})/part_(\\d+)\\.gz$");
+    private static final Logger log = LoggerFactory.getLogger(Planner.class);
 
     /**
      * 通过远端的Manifest文件和本地的file task水位线判断是否需要创建新任务，如果需要，创建新任务
@@ -50,6 +51,7 @@ public final class Planner {
      * @return
      */
     private static Manifest downloadManifest(Entity entity) {
+        log.info("开始下载Manifest");
         HttpClient client = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(10))
                 .followRedirects(HttpClient.Redirect.NORMAL)
@@ -73,12 +75,14 @@ public final class Planner {
             throw new IllegalStateException(
                     "下载manifest失败: HTTP " + response.statusCode() + ", uri=" + uri);
         }
+        log.info("下载完成，开始解析");
         Manifest manifest = parse(response.body());
         if (manifest.entity != entity) {
             throw new IllegalArgumentException(
                     "manifest entity与请求不一致: expected=" + entity.name()
                             + ", actual=" + manifest.entity.name());
         }
+        log.info("Manifest文件解析完成");
         return manifest;
     }
 
@@ -152,6 +156,7 @@ public final class Planner {
      * @return
      */
     private static List<FileEntry> newFilesSince(Manifest manifest,Optional<FileTask> fileTask){
+        log.info("开始计算需要同步的文件列表");
         if (fileTask.isEmpty()) {
             return List.copyOf(manifest.fileEntries);
         }
@@ -164,6 +169,7 @@ public final class Planner {
                 result.add(entry);
             }
         }
+        log.info(result.toString());
         return List.copyOf(result);
     }
 
@@ -180,6 +186,7 @@ public final class Planner {
             System.out.println("没有需要同步的新文件");
             return;
         }
+        log.info("开始插入Job和Task");
         SyncJob syncJob = new SyncJob();
         syncJob.setEntity(manifest.entity);
         syncJob.setSnapshot(LocalDate.parse(manifest.date));
