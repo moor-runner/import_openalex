@@ -10,13 +10,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.zip.GZIPInputStream;
 
-/**
- * 流式行源(契约 C6): 解压数据不落盘。
- *  - s3://  → `aws s3 cp <url> - --no-sign-request` 子进程管道
- *  - file:// → 本地文件(联调毒行夹具, 同样要求 gzip 压缩, 保持路径统一)
- * 完整性约束: 只有读到 EOF 且 s3 子进程退出码为 0, 才允许把文件计为读完整;
- * close() 会做这个校验, 中途放弃必须走 abort()。
- */
+
 public final class LineSource implements AutoCloseable {
 
     private final Process process; // file:// 时为 null

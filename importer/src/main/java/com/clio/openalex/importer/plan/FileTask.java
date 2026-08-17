@@ -1,6 +1,7 @@
 package com.clio.openalex.importer.plan;
 
 import java.time.LocalDate;
+import java.time.LocalDateTime;
 
 public class FileTask {
     String url;
@@ -13,6 +14,31 @@ public class FileTask {
     int part;
     Long record_count;
     Long read_count;
+    LocalDateTime last_heartbeat;
+
+    public LocalDateTime getLast_heartbeat() {
+        return last_heartbeat;
+    }
+
+    public void setLast_heartbeat(LocalDateTime last_heartbeat) {
+        this.last_heartbeat = last_heartbeat;
+    }
+
+    public Long getRecord_count() {
+        return record_count;
+    }
+
+    public void setRecord_count(Long record_count) {
+        this.record_count = record_count;
+    }
+
+    public Long getRead_count() {
+        return read_count;
+    }
+
+    public void setRead_count(Long read_count) {
+        this.read_count = read_count;
+    }
 
     public String getUrl() {
         return url;
