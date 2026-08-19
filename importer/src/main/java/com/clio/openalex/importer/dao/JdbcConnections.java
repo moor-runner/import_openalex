@@ -4,10 +4,10 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.SQLException;
 
-final class JdbcConnections {
-    private static final String DEFAULT_URL = "jdbc:mysql://localhost:3306/openalex";
-    private static final String DEFAULT_USER = "root";
-    private static final String DEFAULT_PASSWORD = "1234";
+public final class JdbcConnections {
+    public static final String DEFAULT_URL = "jdbc:mysql://localhost:3306/openalex";
+    public static final String DEFAULT_USER = "root";
+    public static final String DEFAULT_PASSWORD = "1234";
 
     private JdbcConnections() {
     }
@@ -19,7 +19,7 @@ final class JdbcConnections {
                 setting("openalex.db.password", "OPENALEX_DB_PASSWORD", DEFAULT_PASSWORD));
     }
 
-    private static String setting(String property, String environment, String fallback) {
+    public static String setting(String property, String environment, String fallback) {
         String value = System.getProperty(property);
         if (value == null || value.isBlank()) {
             value = System.getenv(environment);
