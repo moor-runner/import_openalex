@@ -50,6 +50,8 @@ public final class Worker {
     static {
         HikariConfig cfg = new HikariConfig();
         cfg.setJdbcUrl(setting("openalex.db.url", "OPENALEX_DB_URL", DEFAULT_URL));
+        cfg.addDataSourceProperty("rewriteBatchedStatements", "true");  // 驱动把 addBatch 的多行合并成一条多值 INSERT，1000 次往返变 1 次
+        cfg.setConnectionInitSql("SET sql_log_bin = 0");               // 建连接时关 binlog；远端数据可重放，不依赖 binlog 恢复
         cfg.setUsername(DEFAULT_USER);
         cfg.setPassword(DEFAULT_PASSWORD);
         cfg.setMaximumPoolSize(Worker.THREAD_COUNT + 4);  // 20:每个 worker 最多同时占 1 条
