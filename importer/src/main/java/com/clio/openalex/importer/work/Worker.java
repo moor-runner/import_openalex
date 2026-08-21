@@ -1,14 +1,9 @@
 package com.clio.openalex.importer.work;
 
-import com.clio.openalex.importer.dao.FileTaskDAO;
-import com.clio.openalex.importer.exception.RetryableException;
-import com.clio.openalex.importer.plan.FileTask;
-import com.clio.openalex.importer.plan.Entity;
-import com.clio.openalex.importer.plan.PlanArgsParser;
-import com.zaxxer.hikari.HikariConfig;
-import com.zaxxer.hikari.HikariDataSource;
-
-import java.io.*;
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.net.http.HttpClient;
@@ -16,17 +11,37 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
+import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.zip.GZIPInputStream;
 
-import static com.clio.openalex.importer.dao.JdbcConnections.*;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import com.clio.openalex.importer.dao.DeadRowDAO;
+import com.clio.openalex.importer.dao.FileTaskDAO;
+import static com.clio.openalex.importer.dao.JdbcConnections.DEFAULT_PASSWORD;
+import static com.clio.openalex.importer.dao.JdbcConnections.DEFAULT_URL;
+import static com.clio.openalex.importer.dao.JdbcConnections.DEFAULT_USER;
+import static com.clio.openalex.importer.dao.JdbcConnections.setting;
+import com.clio.openalex.importer.exception.RetryableException;
+import com.clio.openalex.importer.plan.Entity;
+import com.clio.openalex.importer.plan.FileTask;
+import com.clio.openalex.importer.plan.PlanArgsParser;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.zaxxer.hikari.HikariConfig;
+import com.zaxxer.hikari.HikariDataSource;
 
 public final class Worker {
 
@@ -43,6 +58,7 @@ public final class Worker {
     }
     static Connection open() throws SQLException { return DS.getConnection(); }
     private static final FileTaskDAO fileTaskDAO = new FileTaskDAO(DS);
+    private static final DeadRowDAO deadRowDAO = new DeadRowDAO(DS);
     /*
     契约拆分：
         1. 根据entity领取任务(同时读取那些僵尸数据)
@@ -62,22 +78,34 @@ public final class Worker {
             .followRedirects(HttpClient.Redirect.NORMAL)
             .build();
     private static final int BATCH_SIZE=1000;
+    private static final Logger log = LoggerFactory.getLogger(Worker.class);
+    /** 本阶段只拉取 openalex，platform 先定死；后续扩展点在数据库(id+json)，不在拉取阶段。 */
+    private static final String PLATFORM = "openalex";
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+    /**
+     * 幂等落库：崩溃重来时整个文件会从头重放，靠 (platform, entity_type, entity_id) 唯一键把重放收敛成一次写入。
+     * created_at 只在首次插入时写，updated_at 每次覆盖，供后续审计/统计。
+     */
+    private static final String UPSERT_SOCIAL_ENTITY = """
+            INSERT INTO social_entity
+                (platform, entity_type, entity_id, data, created_at, updated_at)
+            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ON DUPLICATE KEY UPDATE
+                data = VALUES(data),
+                updated_at = CURRENT_TIMESTAMP
+            """;
+    /**
+     * 线程循环根据entity读取file_task表的Pending状态数据和僵尸数据，
+     * 获取文件url，通过网络获取解压，转换，
+     * 批量插入social_entity表
+     * @param args
+     * @return
+     */
     public static int run(String[] args) {
         Entity entity = PlanArgsParser.parse(args);
         //创建线程池，循环提交固定大小的任务
         ExecutorService pool = Executors.newFixedThreadPool(THREAD_COUNT);
         for (int i = 0; i < THREAD_COUNT; i++) {
-            /*
-            定义Worker线程执行任务的逻辑
-            外置循环，循环领取任务，执行任务
-            1.根据entity领取任务(同时读取那些僵尸数据)
-                领取到了就继续
-                没有领取到，认为是任务都同步完成了，退出任务
-            2.任务状态变更
-                把任务状态置为running
-            3.文件的流式读取和解压，解析
-            4.文件的分批量入库--分批次事务
-            */
             pool.execute(() -> {
                 while (true) {
                     //领取任务：claim 内部已原子置为 running 并刷新心跳
@@ -127,12 +155,30 @@ public final class Worker {
     }
 
     /**
-     * 批量插入一批原始 JSON 行到目标落库表。
-     * TODO: OpenAlex 实体（works/authors/sources）的落库表未在 docs/数据库设计.md 及关系模型中定义，
-     *       按 CLAUDE.md 约束不擅自新增表，待确认表结构后实现。
+     * 批量插入一批原始 JSON 行到目标落库表 social_entity。
+     * 参与调用方（commitChunk）的事务：只 addBatch/executeBatch，绝不 commit / close 连接。
+     * 幂等性由 (platform, entity_type, entity_id) 唯一键 + ON DUPLICATE KEY UPDATE 提供，
+     * 崩溃后重新同步同一文件不会产生重复行。
+     *
+     * @param conn 调用方事务内的连接
+     * @param list 本批次转换好的实体；为空时直接返回
      */
-    static void batchInsert(Connection conn, List<String> list) throws SQLException {
-        throw new UnsupportedOperationException("batchInsert 目标落库表尚未定义，待确认表结构");
+    static void batchInsert(Connection conn, List<SocialEntity> list) throws SQLException {
+        Objects.requireNonNull(conn, "conn");
+        Objects.requireNonNull(list, "list");
+        if (list.isEmpty()) {
+            return;
+        }
+        try (PreparedStatement statement = conn.prepareStatement(UPSERT_SOCIAL_ENTITY)) {
+            for (SocialEntity socialEntity : list) {
+                statement.setString(1, socialEntity.getPlatform());
+                statement.setString(2, socialEntity.getEntityType());
+                statement.setString(3, socialEntity.getEntityId());
+                statement.setString(4, socialEntity.getData());
+                statement.addBatch();
+            }
+            statement.executeBatch();
+        }
     }
 
     /**
@@ -184,9 +230,9 @@ public final class Worker {
              GZIPInputStream gzip = new GZIPInputStream(body, 65536);
              BufferedReader reader = new BufferedReader(
                      new InputStreamReader(gzip, StandardCharsets.UTF_8), 1 << 20)) {
-
             long read_count = 0;
             while (true) {
+                long batchStart = read_count;   // 这批第一条之前已读的行数 = 行号基准（0 基偏移）
                 // 读一个批次，最多 BATCH_SIZE 条；readLine 返回 null 即到 EOF
                 List<String> list = new ArrayList<>();
                 for (int i = 0; i < BATCH_SIZE; i++) {
@@ -205,7 +251,14 @@ public final class Worker {
                 try (Connection conn = open()) {
                     conn.setAutoCommit(false);
                     try {
-                        batchInsert(conn, list);                         // DAO
+                        TransformResult result = transform(
+                                fileTask.getEntity(), fileTask.getFileId(), batchStart, list);
+                        batchInsert(conn, result.entities());                      // 好行 → social_entity
+                        if (!result.deadRows().isEmpty()) {                        // 非空才落，空批不进 DAO
+                            deadRowDAO.insert(conn, result.deadRows());            // 坏行 → dead_row（同一事务）
+                            log.debug("落 dead row: fileId={}, 本批坏行数={}",
+                                    fileTask.getFileId(), result.deadRows().size());
+                        }
                         updateHeartbeatAndCount(conn, fileTask, read_count);
                         conn.commit();
                     } catch (Exception e) {   // 任何异常都回滚并上报，绝不吞
@@ -238,6 +291,56 @@ public final class Worker {
         } catch (URISyntaxException e) {
             throw new IllegalArgumentException("bad s3 url: " + url, e);
         }
+    }
+
+    /**
+     * 把Json格式的字符串转换成SocialEntity对象
+     * platform先定死为openalex
+     * data 保留原始JSON原文（不重序列化），只解析出 entity_id 用于唯一性区分。
+     * OpenAlex 的 id 是 URL（https://openalex.org/A5023888391），取最后一段作为 entity_id。
+     * 单行数据本身有问题（解不开的JSON / 没有id）属于 Poisoned，
+     * 按 worker 阶段设计不丢弃、落 dead row 后继续解析，不让一行脏数据拖垮整个文件；
+     * 空行不是数据，静默跳过不算 Poisoned；数量差异交给 reconcile 阶段校验。
+     * 纯函数：不碰数据库，坏行只组装成 DeadRow 返回，由 importFile 在 chunk 事务里落库。
+     *
+     * @param entity 当前任务的entity，决定 entity_type
+     * @param fileId 当前 file_task 主键，dead row 定位用
+     * @param lineOffset 本批第一条之前已读的行数，用于算 dead row 的绝对行号
+     * @param origin_list 一个批次的原始JSON行
+     * @return 好行(可落库实体) + 坏行(dead row) 两条通道
+     */
+    public static TransformResult transform(Entity entity, long fileId, long lineOffset, List<String> origin_list){
+        Objects.requireNonNull(entity, "entity");
+        Objects.requireNonNull(origin_list, "origin_list");
+        String entityType = entity.name().toLowerCase(Locale.ROOT);
+        List<SocialEntity> socialEntities = new ArrayList<>(origin_list.size());
+        List<DeadRow> deadRows = new ArrayList<>();
+        for (int i = 0; i < origin_list.size(); i++) {
+            String line = origin_list.get(i);
+            long lineNo = lineOffset + i + 1;              // 文件内绝对行号（1 基）
+            if (line == null || line.isBlank()) {
+                continue;                                  // 空行不是数据，静默跳过（不算 Poisoned）
+            }
+            String rawId;
+            try {
+                JsonNode node = MAPPER.readTree(line);
+                rawId = node.path("id").asText("");
+            } catch (JsonProcessingException e) {
+                // Poisoned：数据本身解不开，落 dead row 继续
+                String msg = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
+                deadRows.add(new DeadRow(fileId, lineNo, line, msg, entityType));
+                continue;
+            }
+            int slash = rawId.lastIndexOf('/');
+            String entityId = slash < 0 ? rawId : rawId.substring(slash + 1);
+            if (entityId.isBlank()) {
+                // 没有id就无法做幂等upsert，同样当 Poisoned 处理，落 dead row 继续
+                deadRows.add(new DeadRow(fileId, lineNo, line, "missing id", entityType));
+                continue;
+            }
+            socialEntities.add(new SocialEntity(null, entityType, PLATFORM, entityId, line));
+        }
+        return new TransformResult(socialEntities, deadRows);
     }
 
     private Worker() {

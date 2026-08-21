@@ -6,7 +6,11 @@ public class SocialEntity {
     private Long    id;
     private String  platform;      // "openalex"
     private String  entityType;    // "authors"
-
+    private String  entityId;      // "A5023888391"
+    private String  data;          // 原始 JSON 原文，未经解析
+    private Instant createdAt;
+    private Instant updatedAt;
+    
     public String getEntityType() {
         return entityType;
     }
@@ -71,8 +75,5 @@ public class SocialEntity {
         this.data = data;
     }
 
-    private String  entityId;      // "A5023888391"
-    private String  data;          // 原始 JSON 原文，未经解析
-    private Instant createdAt;
-    private Instant updatedAt;
+   
 }
