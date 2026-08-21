@@ -44,7 +44,7 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 
 public final class Worker {
-
+    //TODO 添加MDC日志用于性能监控和进度记录 分为文件级，数据块级，全局级
     public static final int THREAD_COUNT = 16;
     private static final HikariDataSource DS;
     static {
