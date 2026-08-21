@@ -61,33 +61,14 @@ public final class Worker {
     static Connection open() throws SQLException { return DS.getConnection(); }
     private static final FileTaskDAO fileTaskDAO = new FileTaskDAO(DS);
     private static final DeadRowDAO deadRowDAO = new DeadRowDAO(DS);
-    /*
-    契约拆分：
-        1. 根据entity领取任务(同时读取那些僵尸数据)
-        2. 状态变更
-        3. 读取url
-        4. 读取文件
-        5. 解压文件
-        6. 解析文件
-        7. 校验数据
-        8. 批量插入数据库(参考Spring Batch)
-           1. 事务的处理
-           2. 事务的拆分
-        9. 状态变更
-     */
     private static HttpClient client = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(10))       // 必须：否则连不上就永久挂起
             .followRedirects(HttpClient.Redirect.NORMAL)
             .build();
     private static final int BATCH_SIZE=1000;
     private static final Logger log = LoggerFactory.getLogger(Worker.class);
-    /** 本阶段只拉取 openalex，platform 先定死；后续扩展点在数据库(id+json)，不在拉取阶段。 */
     private static final String PLATFORM = "openalex";
     private static final ObjectMapper MAPPER = new ObjectMapper();
-    /**
-     * 幂等落库：崩溃重来时整个文件会从头重放，靠 (platform, entity_type, entity_id) 唯一键把重放收敛成一次写入。
-     * created_at 只在首次插入时写，updated_at 每次覆盖，供后续审计/统计。
-     */
     private static final String UPSERT_SOCIAL_ENTITY = """
             INSERT INTO social_entity
                 (platform, entity_type, entity_id, data, created_at, updated_at)
@@ -96,6 +77,8 @@ public final class Worker {
                 data = VALUES(data),
                 updated_at = CURRENT_TIMESTAMP
             """;
+
+
     /**
      * 线程循环根据entity读取file_task表的Pending状态数据和僵尸数据，
      * 获取文件url，通过网络获取解压，转换，
@@ -120,8 +103,10 @@ public final class Worker {
                         importFile(task);
                         fileTaskDAO.markDone(task.getFileId());          //成功：done
                     } catch (RetryableException e) {
+                        log.warn("可重试异常，将 fileId={} 的任务状态置为 Pending", fileTask.get().getFileId());
                         fileTaskDAO.markPending(task.getFileId());       //可重试：退回 pending
                     } catch (Exception e) {
+                        log.error("其他异常，将 fileId={} 的任务状态置为 Failed", fileTask.get().getFileId());
                         fileTaskDAO.markFailed(task.getFileId());        //Fatal/IO/SQL 等：failed，继续领下一个
                     }
                 }
@@ -132,6 +117,7 @@ public final class Worker {
         try {
             pool.awaitTermination(Long.MAX_VALUE, TimeUnit.SECONDS);
         } catch (InterruptedException e) {
+            log.warn("线程池执行被打断，立即终止");
             Thread.currentThread().interrupt();
             pool.shutdownNow();
         }
@@ -330,6 +316,7 @@ public final class Worker {
             } catch (JsonProcessingException e) {
                 // Poisoned：数据本身解不开，落 dead row 继续
                 String msg = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
+                log.warn("遇到Poisoned数据错误信息:{}",msg);
                 deadRows.add(new DeadRow(fileId, lineNo, line, msg, entityType));
                 continue;
             }
