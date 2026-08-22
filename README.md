@@ -1,1 +1,3 @@
-项目是ELT管道的EL部分，通过拆分架构为 plan worker reconcile三个阶段实现原始数据的数据库导入
+项目是一个ELT管道，整体需求是将远端openalex的数据通过EL加载到mysql数据库，再通过LT过程同步到ES和OSS对象存储服务
+EL的部分在importer模块
+LT的部分在transformr模块
